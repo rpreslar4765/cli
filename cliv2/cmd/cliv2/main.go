@@ -11,9 +11,10 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"strconv"
+	"os/signal"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/google/uuid"
@@ -75,6 +76,7 @@ import (
 var internalOS string
 var globalEngine workflow.Engine
 var globalConfiguration configuration.Configuration
+var globalContext context.Context
 var helpProvided bool
 
 var noopLogger zerolog.Logger = zerolog.New(io.Discard)
@@ -88,6 +90,7 @@ const (
 	debug_level_flag          string = "log-level"
 	integrationNameFlag       string = "integration-name"
 	maxNetworkRequestAttempts string = "max-attempts"
+	teardownTimeout                  = 5 * time.Second
 )
 
 type JsonErrorStruct struct {
@@ -194,96 +197,31 @@ func runMainWorkflow(config configuration.Configuration, cmd *cobra.Command, arg
 	globalLogger.Print("Running ", name)
 	globalEngine.GetAnalytics().SetCommand(name)
 
-	err = runWorkflowAndProcessData(globalEngine, globalLogger, name)
+	err = runWorkflowAndProcessData(globalContext, globalEngine, globalLogger, name)
 
 	return err
 }
 
-func runWorkflowAndProcessData(engine workflow.Engine, logger *zerolog.Logger, name string) error {
+func runWorkflowAndProcessData(ctx context.Context, engine workflow.Engine, logger *zerolog.Logger, name string) error {
 	ic := engine.GetAnalytics().GetInstrumentation()
 
-	output, err := engine.Invoke(workflow.NewWorkflowIdentifier(name), workflow.WithInstrumentationCollector(ic))
+	output, err := engine.Invoke(workflow.NewWorkflowIdentifier(name), workflow.WithContext(ctx), workflow.WithInstrumentationCollector(ic))
 	if err != nil {
 		logger.Print("Failed to execute the command! ", err)
 		return err
 	}
 
-	outputFiltered, err := engine.Invoke(localworkflows.WORKFLOWID_FILTER_FINDINGS, workflow.WithInput(output), workflow.WithInstrumentationCollector(ic))
+	outputFiltered, err := engine.Invoke(localworkflows.WORKFLOWID_FILTER_FINDINGS, workflow.WithContext(ctx), workflow.WithInput(output), workflow.WithInstrumentationCollector(ic))
 	if err != nil {
 		logger.Err(err).Msg(err.Error())
 		return err
 	}
 
-	_, err = engine.Invoke(localworkflows.WORKFLOWID_OUTPUT_WORKFLOW, workflow.WithInput(outputFiltered), workflow.WithInstrumentationCollector(ic))
+	_, err = engine.Invoke(localworkflows.WORKFLOWID_OUTPUT_WORKFLOW, workflow.WithContext(ctx), workflow.WithInput(outputFiltered), workflow.WithInstrumentationCollector(ic))
 	if err == nil {
 		err = getErrorFromWorkFlowData(engine, outputFiltered)
 	}
 	return err
-}
-
-func sendAnalytics(analytics analytics.Analytics, debugLogger *zerolog.Logger) {
-	debugLogger.Print("Sending Analytics")
-
-	analytics.SetApiUrl(globalConfiguration.GetString(configuration.API_URL))
-
-	res, err := analytics.Send()
-	if err != nil {
-		debugLogger.Err(err).Msg("Failed to send Analytics")
-		return
-	}
-	defer func() { _ = res.Body.Close() }()
-
-	successfullySend := 200 <= res.StatusCode && res.StatusCode < 300
-	if successfullySend {
-		debugLogger.Print("Analytics successfully send")
-	} else {
-		var details string
-		if res != nil {
-			details = res.Status
-		}
-
-		debugLogger.Print("Failed to send Analytics:", details)
-	}
-}
-
-func sendInstrumentation(eng workflow.Engine, instrumentor analytics.InstrumentationCollector, logger *zerolog.Logger) {
-	// Avoid duplicate data to be sent for IDE integrations that use the CLI
-	if !shallSendInstrumentation(eng.GetConfiguration(), instrumentor) {
-		logger.Print("This CLI call is not instrumented!")
-		return
-	}
-
-	// add temporary static nodejs binary flag, remove once linuxstatic is official
-	staticNodeJsBinaryBool, parseErr := strconv.ParseBool(constants.StaticNodeJsBinary)
-	if parseErr != nil {
-		logger.Print("Failed to parse staticNodeJsBinary:", parseErr)
-	} else {
-		// the legacycli:: prefix is added to maintain compatibility with our monitoring dashboard
-		instrumentor.AddExtension("legacycli::static-nodejs-binary", staticNodeJsBinaryBool)
-	}
-
-	logger.Print("Sending Instrumentation")
-	data, err := analytics.GetV2InstrumentationObject(instrumentor, analytics.WithLogger(logger))
-	if err != nil {
-		logger.Err(err).Msg("Failed to derive data object")
-	}
-
-	v2InstrumentationData := utils.ValueOf(json.Marshal(data))
-	localConfiguration := globalConfiguration.Clone()
-	// the report analytics workflow needs --experimental to run
-	// we pass the flag here so that we report at every interaction
-	localConfiguration.Set(configuration.FLAG_EXPERIMENTAL, true)
-	localConfiguration.Set("inputData", string(v2InstrumentationData))
-	_, err = eng.InvokeWithConfig(
-		localworkflows.WORKFLOWID_REPORT_ANALYTICS,
-		localConfiguration,
-	)
-
-	if err != nil {
-		logger.Err(err).Msg("Failed to send Instrumentation")
-	} else {
-		logger.Print("Instrumentation successfully sent")
-	}
 }
 
 func help(_ *cobra.Command, _ []string) error {
@@ -548,11 +486,55 @@ func initExtensions(engine workflow.Engine, config configuration.Configuration) 
 	}
 }
 
+// tearDown handles sending analytics and instrumentation
+// It is used both for normal exit and signal-triggered exit
+func tearDown(ctx context.Context, err error, errorList []error, startTime time.Time, ua networking.UserAgentInfo, cliAnalytics analytics.Analytics, networkAccess networking.NetworkAccess) int {
+	// Create a context with timeout for teardown operations to ensure we don't hang indefinitely
+	teardownCtx, cancel := context.WithTimeout(ctx, teardownTimeout)
+	defer cancel()
+
+	if err != nil {
+		errorList, err = processError(err, errorList)
+
+		for _, tempError := range errorList {
+			if tempError != nil {
+				cliAnalytics.AddError(tempError)
+			}
+		}
+	}
+
+	exitCode := cliv2.DeriveExitCode(err)
+	globalLogger.Printf("Deriving Exit Code %d (cause: %v)", exitCode, err)
+
+	displayError(err, globalEngine.GetUserInterface(), globalConfiguration, teardownCtx)
+
+	updateInstrumentationDataBeforeSending(cliAnalytics, startTime, ua, exitCode)
+
+	if !globalConfiguration.GetBool(configuration.ANALYTICS_DISABLED) {
+		sendAnalytics(teardownCtx, cliAnalytics, globalLogger)
+	}
+	sendInstrumentation(teardownCtx, globalEngine, cliAnalytics.GetInstrumentation(), globalLogger)
+
+	// cleanup resources in use
+	// WARNING: deferred actions will execute AFTER cleanup; only defer if not impacted by this
+	if _, cleanupErr := globalEngine.Invoke(basic_workflows.WORKFLOWID_GLOBAL_CLEANUP, workflow.WithContext(teardownCtx)); cleanupErr != nil {
+		globalLogger.Printf("Failed to cleanup %v", cleanupErr)
+	}
+
+	if globalConfiguration.GetBool(configuration.DEBUG) {
+		writeLogFooter(exitCode, errorList, globalConfiguration, networkAccess)
+	}
+
+	return exitCode
+}
+
 func MainWithErrorCode() int {
 	initDebugBuild()
 
 	errorList := []error{}
 	errorListMutex := sync.Mutex{}
+	var tearDownOnce sync.Once
+	var finalExitCode int
 
 	startTime := time.Now()
 	var err error
@@ -633,9 +615,11 @@ func MainWithErrorCode() int {
 		return constants.SNYK_EXIT_CODE_ERROR
 	}
 
-	// init context
-	ctx := context.Background()
+	// init context with cancel function for signal handling
+	ctx, ctxCancel := context.WithCancel(context.Background())
+	defer ctxCancel() // ensure context is canceled on exit
 	ctx = context.WithValue(ctx, networking.InteractionIdKey, instrumentation.AssembleUrnFromUUID(interactionId))
+	globalContext = ctx
 
 	// add output flags as persistent flags
 	outputWorkflow, _ := globalEngine.GetWorkflow(localworkflows.WORKFLOWID_OUTPUT_WORKFLOW)
@@ -655,6 +639,35 @@ func MainWithErrorCode() int {
 	cliAnalytics.GetInstrumentation().SetCategory(instrumentation.DetermineCategory(os.Args, globalEngine))
 	cliAnalytics.GetInstrumentation().SetStage(instrumentation.DetermineStage(cliAnalytics.IsCiEnvironment()))
 	cliAnalytics.GetInstrumentation().SetStatus(analytics.Success)
+
+	// prepare for signal handling
+	signalChan := make(chan os.Signal, 1)
+	exitCodeChan := make(chan int, 1)
+
+	if globalConfiguration.GetBool(configuration.PREVIEW_FEATURES_ENABLED) {
+		// Set up signal handling to send instrumentation on premature termination
+		signal.Notify(signalChan, syscall.SIGINT, syscall.SIGTERM)
+		go func() {
+			sig := <-signalChan
+			globalLogger.Printf("Received signal %v, attempting to send instrumentation before exit", sig)
+
+			// Cancel the context to terminate any running child processes
+			ctxCancel()
+
+			tearDownOnce.Do(func() {
+				signalError := cli.NewTerminatedBySignalError(fmt.Sprintf("Signal: %v", sig))
+
+				errorListMutex.Lock()
+				errorListCopy := append([]error{}, errorList...)
+				errorListMutex.Unlock()
+
+				finalExitCode = tearDown(ctx, signalError, errorListCopy, startTime, ua, cliAnalytics, networkAccess)
+			})
+			// Send exit code to main goroutine instead of calling os.Exit directly
+			// This allows deferred functions (like lock cleanup) to run
+			exitCodeChan <- finalExitCode
+		}()
+	}
 
 	setTimeout(globalConfiguration, func() {
 		os.Exit(constants.SNYK_EXIT_CODE_EX_UNAVAILABLE)
@@ -681,40 +694,29 @@ func MainWithErrorCode() int {
 		// ignore
 	}
 
-	if err != nil {
-		errorList, err = processError(err, errorList)
-
-		for _, tempError := range errorList {
-			if tempError != nil {
-				cliAnalytics.AddError(tempError)
-			}
-		}
+	// Check if signal handler already ran teardown
+	select {
+	case code := <-exitCodeChan:
+		// Signal was received and teardown completed - return its exit code
+		return code
+	default:
+		// No signal received - run normal teardown
 	}
 
-	displayError(err, globalEngine.GetUserInterface(), globalConfiguration, ctx)
-
-	exitCode := cliv2.DeriveExitCode(err)
-	globalLogger.Printf("Deriving Exit Code %d (cause: %v)", exitCode, err)
-
-	updateInstrumentationDataBeforeSending(cliAnalytics, startTime, ua, exitCode)
-
-	if !globalConfiguration.GetBool(configuration.ANALYTICS_DISABLED) {
-		sendAnalytics(cliAnalytics, globalLogger)
-	}
-	sendInstrumentation(globalEngine, cliAnalytics.GetInstrumentation(), globalLogger)
-
-	// cleanup resources in use
-	// WARNING: deferred actions will execute AFTER cleanup; only defer if not impacted by this
-	_, err = globalEngine.Invoke(basic_workflows.WORKFLOWID_GLOBAL_CLEANUP)
-	if err != nil {
-		globalLogger.Printf("Failed to cleanup %v", err)
+	if globalConfiguration.GetBool(configuration.PREVIEW_FEATURES_ENABLED) {
+		// Stop signal handling before cleanup to prevent race conditions
+		signal.Stop(signalChan)
 	}
 
-	if debugEnabled {
-		writeLogFooter(exitCode, errorList, globalConfiguration, networkAccess)
-	}
+	tearDownOnce.Do(func() {
+		errorListMutex.Lock()
+		errorListCopy := append([]error{}, errorList...)
+		errorListMutex.Unlock()
 
-	return exitCode
+		finalExitCode = tearDown(ctx, err, errorListCopy, startTime, ua, cliAnalytics, networkAccess)
+	})
+
+	return finalExitCode
 }
 
 func processError(err error, errorList []error) ([]error, error) {

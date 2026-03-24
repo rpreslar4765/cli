@@ -408,7 +408,7 @@ func Test_extractOnlyOnce(t *testing.T) {
 	assert.NoError(t, cli.Init())
 
 	// run once
-	err = cli.Execute(getProxyInfoForTest(), []string{"--help"})
+	err = cli.Execute(context.Background(), getProxyInfoForTest(), []string{"--help"})
 	assert.Error(t, err) // invalid binary expected here
 	assert.FileExists(t, cli.GetBinaryLocation())
 	fileInfo1, err := os.Stat(cli.GetBinaryLocation())
@@ -419,7 +419,7 @@ func Test_extractOnlyOnce(t *testing.T) {
 
 	// run twice
 	assert.Nil(t, cli.Init())
-	err = cli.Execute(getProxyInfoForTest(), []string{"--help"})
+	err = cli.Execute(context.Background(), getProxyInfoForTest(), []string{"--help"})
 	assert.Error(t, err) // invalid binary expected here
 	assert.FileExists(t, cli.GetBinaryLocation())
 	fileInfo2, err := os.Stat(cli.GetBinaryLocation())
@@ -479,7 +479,7 @@ func Test_executeRunV2only(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NoError(t, cli.Init())
 
-	actualReturnCode := cliv2.DeriveExitCode(cli.Execute(getProxyInfoForTest(), []string{"--version"}))
+	actualReturnCode := cliv2.DeriveExitCode(cli.Execute(context.Background(), getProxyInfoForTest(), []string{"--version"}))
 	assert.Equal(t, expectedReturnCode, actualReturnCode)
 	assert.FileExists(t, cli.GetBinaryLocation())
 }
@@ -496,7 +496,7 @@ func Test_executeUnknownCommand(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NoError(t, cli.Init())
 
-	actualReturnCode := cliv2.DeriveExitCode(cli.Execute(getProxyInfoForTest(), []string{"bogusCommand"}))
+	actualReturnCode := cliv2.DeriveExitCode(cli.Execute(context.Background(), getProxyInfoForTest(), []string{"bogusCommand"}))
 	assert.Equal(t, expectedReturnCode, actualReturnCode)
 }
 
@@ -590,7 +590,7 @@ func Test_setTimeout(t *testing.T) {
 
 	// sleep for 2s
 	cli.SetV1BinaryLocation("/bin/sleep")
-	err = cli.Execute(getProxyInfoForTest(), []string{"2"})
+	err = cli.Execute(context.Background(), getProxyInfoForTest(), []string{"2"})
 
 	assert.ErrorIs(t, err, context.DeadlineExceeded)
 }

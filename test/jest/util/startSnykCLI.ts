@@ -86,31 +86,46 @@ const createTestCLI = (child: ChildProcessWithoutNullStreams) => {
 
   /**
    * Waits for process to exit and provides the exit code.
+   * When a process is killed by a signal, code may be null and signal will be set.
    */
   const wait = async ({
     timeout = DEFAULT_ASSERTION_TIMEOUT,
   } = {}): Promise<number> => {
-    if (child.killed) {
-      return child.exitCode || 0;
+    // If process has already exited, return the exit code immediately
+    if (child.exitCode !== null) {
+      return child.exitCode;
     }
     return new Promise((resolve, reject) => {
       const onTimeout = () => {
         child.removeListener('error', onError);
         child.removeListener('close', onClose);
+        child.removeListener('exit', onExit);
         reject(new AssertionTimeoutError('wait', timeout));
       };
       const onError = (error) => {
         clearTimeout(timeoutId);
+        child.removeListener('close', onClose);
+        child.removeListener('exit', onExit);
         reject(error);
       };
+      let exitCode: number | null = null;
       const onClose = (code) => {
         clearTimeout(timeoutId);
-        resolve(code || 0);
+        child.removeListener('error', onError);
+        child.removeListener('exit', onExit);
+        // Use exit code captured from 'exit' event, or from 'close' event, or child.exitCode
+        const finalCode = exitCode ?? code ?? child.exitCode ?? 0;
+        resolve(finalCode);
+      };
+      const onExit = (code) => {
+        // 'exit' fires before 'close' - capture the exit code here
+        exitCode = code;
       };
 
       const timeoutId = setTimeout(onTimeout, timeout);
       child.once('error', onError);
       child.once('close', onClose);
+      child.once('exit', onExit);
     });
   };
 

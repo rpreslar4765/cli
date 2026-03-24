@@ -5,5 +5,6 @@ module.exports = createJestConfig({
   displayName: 'coreCli',
   projects: ['<rootDir>', '<rootDir>/packages/*'],
   globalSetup: './test/setup.js',
+  globalTeardown: './test/teardown.js',
   setupFilesAfterEnv: ['./test/setup-jest.ts'],
 });

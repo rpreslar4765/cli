@@ -466,7 +466,7 @@ func Test_runWorkflowAndProcessData(t *testing.T) {
 
 	// invoke method under test
 	logger := zerolog.New(os.Stderr)
-	err = runWorkflowAndProcessData(globalEngine, &logger, testCmnd)
+	err = runWorkflowAndProcessData(context.Background(), globalEngine, &logger, testCmnd)
 
 	var expectedError *clierrors.ErrorWithExitCode
 	assert.ErrorAs(t, err, &expectedError)
@@ -560,7 +560,7 @@ func Test_runWorkflowAndProcessData_with_Filtering(t *testing.T) {
 	assert.NoError(t, err)
 
 	logger := zerolog.New(os.Stderr)
-	err = runWorkflowAndProcessData(globalEngine, &logger, testCmnd)
+	err = runWorkflowAndProcessData(context.Background(), globalEngine, &logger, testCmnd)
 }
 
 func Test_setTimeout(t *testing.T) {
