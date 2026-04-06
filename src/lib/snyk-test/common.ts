@@ -80,6 +80,50 @@ export type FailOn = 'all' | 'upgradable' | 'patchable';
 export const RETRY_ATTEMPTS = 3;
 export const RETRY_DELAY = 500;
 
+export interface PrintGraphMode {
+  printGraphEnabled: boolean;
+  effectiveGraph: boolean;
+  jsonlOutput: boolean;
+  printErrors: boolean;
+}
+
+/**
+ * getPrintGraphMode derives canonical print-graph behavior from both
+ * the new flag set and legacy aliases during the migration window.
+ */
+export function getPrintGraphMode(opts: Options): PrintGraphMode {
+  const legacyEffectiveGraph = !!opts['print-effective-graph'];
+  const legacyEffectiveGraphWithErrors =
+    !!opts['print-effective-graph-with-errors'];
+
+  const printGraphEnabled =
+    !!opts['print-graph'] ||
+    legacyEffectiveGraph ||
+    legacyEffectiveGraphWithErrors;
+
+  const effectiveGraph =
+    !!opts['effective-graph'] ||
+    legacyEffectiveGraph ||
+    legacyEffectiveGraphWithErrors;
+
+  const printErrors =
+    printGraphEnabled &&
+    (!!opts['print-errors'] || legacyEffectiveGraphWithErrors);
+
+  const jsonlOutput =
+    printGraphEnabled &&
+    (!!opts['jsonl-output'] ||
+      legacyEffectiveGraph ||
+      legacyEffectiveGraphWithErrors);
+
+  return {
+    printGraphEnabled,
+    effectiveGraph,
+    jsonlOutput,
+    printErrors,
+  };
+}
+
 /**
  * printDepGraph writes the given dep-graph and target name to the destination
  * stream as expected by the `depgraph` CLI workflow.
@@ -102,7 +146,8 @@ export async function printDepGraph(
 }
 
 export function shouldPrintDepGraph(opts: Options): boolean {
-  return opts['print-graph'] && !opts['print-deps'];
+  const mode = getPrintGraphMode(opts);
+  return mode.printGraphEnabled && !mode.effectiveGraph && !opts['print-deps'];
 }
 
 /**
@@ -173,18 +218,17 @@ export async function printEffectiveDepGraphError(
  * Checks if either --print-effective-graph or --print-effective-graph-with-errors is set.
  */
 export function shouldPrintEffectiveDepGraph(opts: Options): boolean {
-  return (
-    !!opts['print-effective-graph'] ||
-    shouldPrintEffectiveDepGraphWithErrors(opts)
-  );
+  const mode = getPrintGraphMode(opts);
+  return mode.printGraphEnabled && mode.effectiveGraph;
 }
 
 /**
- * shouldPrintEffectiveDepGraphWithErrors checks if the --print-effective-graph-with-errors flag is set.
- * This is used to determine if the effective dep-graph with errors should be printed.
+ * shouldPrintDepGraphWithErrors returns true when dependency graph output
+ * is requested and error entries should also be printed.
  */
-export function shouldPrintEffectiveDepGraphWithErrors(opts: Options): boolean {
-  return !!opts['print-effective-graph-with-errors'];
+export function shouldPrintDepGraphWithErrors(opts: Options): boolean {
+  const mode = getPrintGraphMode(opts);
+  return mode.printGraphEnabled && mode.printErrors;
 }
 
 /**

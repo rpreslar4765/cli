@@ -45,7 +45,7 @@ import {
   assembleQueryString,
   shouldPrintDepGraph,
   shouldPrintEffectiveDepGraph,
-  shouldPrintEffectiveDepGraphWithErrors,
+  shouldPrintDepGraphWithErrors,
 } from './common';
 import config from '../config';
 import * as analytics from '../analytics';
@@ -656,7 +656,7 @@ async function assembleLocalPayloads(
       await spinner.clear<void>(spinnerLbl)();
       // When printing effective dep-graph with errors, suppress warning output —
       // the failures will be embedded in the generated SBOM as annotations.
-      const suppressWarnings = shouldPrintEffectiveDepGraphWithErrors(options);
+      const suppressWarnings = shouldPrintDepGraphWithErrors(options);
       const isNotJsonOrQueiet =
         !options.json && !options.quiet && !suppressWarnings;
 
@@ -679,7 +679,7 @@ async function assembleLocalPayloads(
         failedResults,
       );
 
-      if (shouldPrintEffectiveDepGraphWithErrors(options)) {
+      if (shouldPrintDepGraphWithErrors(options)) {
         for (const failed of failedResults) {
           await printEffectiveDepGraphError(root, failed, process.stdout);
         }
