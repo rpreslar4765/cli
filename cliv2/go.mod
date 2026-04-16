@@ -1,6 +1,6 @@
 module github.com/snyk/cli/cliv2
 
-go 1.25.7
+go 1.26.2
 
 require (
 	github.com/elazarl/goproxy v1.7.2
@@ -13,19 +13,19 @@ require (
 	github.com/snyk/cli-extension-agent-scan v0.0.0-20260312152423-bc36193ecaa8
 	github.com/snyk/cli-extension-ai-bom v0.0.0-20260319140413-ac7392950603
 	github.com/snyk/cli-extension-ai-redteam v0.0.0-20260331152502-ce341aeaff9e
-	github.com/snyk/cli-extension-dep-graph v0.32.0
+	github.com/snyk/cli-extension-dep-graph v0.32.3
 	github.com/snyk/cli-extension-iac v0.0.0-20260206082514-00c443ccee80
 	github.com/snyk/cli-extension-iac-rules v0.0.0-20260206080712-9cbb5f95465d
-	github.com/snyk/cli-extension-os-flows v0.0.0-20260330131038-f7539faafecf
+	github.com/snyk/cli-extension-os-flows v0.0.0-20260407123134-f9617cb05038
 	github.com/snyk/cli-extension-sbom v0.0.0-20260327120356-9befea04c9b0
-	github.com/snyk/cli-extension-secrets v0.0.0-20260330131056-456a17f6d188
+	github.com/snyk/cli-extension-secrets v0.0.0-20260407113038-69d8fdb95266
 	github.com/snyk/code-client-go v1.26.2
 	github.com/snyk/container-cli v0.0.0-20260213211631-cd2b2cf8f3ea
 	github.com/snyk/error-catalog-golang-public v0.0.0-20260316131845-f02d7f42046b
-	github.com/snyk/go-application-framework v0.0.0-20260331133539-67257bb99539
+	github.com/snyk/go-application-framework v0.0.0-20260409121620-3a9c4e9c4dcd
 	github.com/snyk/go-httpauth v0.0.0-20240307114523-1f5ea3f55c65
 	github.com/snyk/snyk-iac-capture v0.6.5
-	github.com/snyk/snyk-ls v0.0.0-20260401163317-c1fe9ee766fd
+	github.com/snyk/snyk-ls v0.0.0-20260414093345-2a6d7434eb91
 	github.com/snyk/studio-mcp v1.9.1
 	github.com/spf13/cobra v1.9.1
 	github.com/spf13/pflag v1.0.10
@@ -244,11 +244,11 @@ require (
 	go.opentelemetry.io/contrib/detectors/gcp v1.39.0 // indirect
 	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.63.0 // indirect
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.61.0 // indirect
-	go.opentelemetry.io/otel v1.40.0 // indirect
-	go.opentelemetry.io/otel/metric v1.40.0 // indirect
+	go.opentelemetry.io/otel v1.41.0 // indirect
+	go.opentelemetry.io/otel/metric v1.41.0 // indirect
 	go.opentelemetry.io/otel/sdk v1.40.0 // indirect
 	go.opentelemetry.io/otel/sdk/metric v1.40.0 // indirect
-	go.opentelemetry.io/otel/trace v1.40.0 // indirect
+	go.opentelemetry.io/otel/trace v1.41.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	golang.org/x/crypto v0.47.0 // indirect
 	golang.org/x/exp v0.0.0-20251023183803-a4bb9ffd2546 // indirect
