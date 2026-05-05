@@ -11,7 +11,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -75,6 +74,7 @@ import (
 var internalOS string
 var globalEngine workflow.Engine
 var globalConfiguration configuration.Configuration
+var globalContext context.Context
 var helpProvided bool
 
 var noopLogger zerolog.Logger = zerolog.New(io.Discard)
@@ -88,6 +88,7 @@ const (
 	debug_level_flag          string = "log-level"
 	integrationNameFlag       string = "integration-name"
 	maxNetworkRequestAttempts string = "max-attempts"
+	teardownTimeout                  = 5 * time.Second
 )
 
 type JsonErrorStruct struct {
@@ -194,96 +195,31 @@ func runMainWorkflow(config configuration.Configuration, cmd *cobra.Command, arg
 	globalLogger.Print("Running ", name)
 	globalEngine.GetAnalytics().SetCommand(name)
 
-	err = runWorkflowAndProcessData(globalEngine, globalLogger, name)
+	err = runWorkflowAndProcessData(globalContext, globalEngine, globalLogger, name)
 
 	return err
 }
 
-func runWorkflowAndProcessData(engine workflow.Engine, logger *zerolog.Logger, name string) error {
+func runWorkflowAndProcessData(ctx context.Context, engine workflow.Engine, logger *zerolog.Logger, name string) error {
 	ic := engine.GetAnalytics().GetInstrumentation()
 
-	output, err := engine.Invoke(workflow.NewWorkflowIdentifier(name), workflow.WithInstrumentationCollector(ic))
+	output, err := engine.Invoke(workflow.NewWorkflowIdentifier(name), workflow.WithContext(ctx), workflow.WithInstrumentationCollector(ic))
 	if err != nil {
 		logger.Print("Failed to execute the command! ", err)
 		return err
 	}
 
-	outputFiltered, err := engine.Invoke(localworkflows.WORKFLOWID_FILTER_FINDINGS, workflow.WithInput(output), workflow.WithInstrumentationCollector(ic))
+	outputFiltered, err := engine.Invoke(localworkflows.WORKFLOWID_FILTER_FINDINGS, workflow.WithContext(ctx), workflow.WithInput(output), workflow.WithInstrumentationCollector(ic))
 	if err != nil {
 		logger.Err(err).Msg(err.Error())
 		return err
 	}
 
-	_, err = engine.Invoke(localworkflows.WORKFLOWID_OUTPUT_WORKFLOW, workflow.WithInput(outputFiltered), workflow.WithInstrumentationCollector(ic))
+	_, err = engine.Invoke(localworkflows.WORKFLOWID_OUTPUT_WORKFLOW, workflow.WithContext(ctx), workflow.WithInput(outputFiltered), workflow.WithInstrumentationCollector(ic))
 	if err == nil {
 		err = getErrorFromWorkFlowData(engine, outputFiltered)
 	}
 	return err
-}
-
-func sendAnalytics(analytics analytics.Analytics, debugLogger *zerolog.Logger) {
-	debugLogger.Print("Sending Analytics")
-
-	analytics.SetApiUrl(globalConfiguration.GetString(configuration.API_URL))
-
-	res, err := analytics.Send()
-	if err != nil {
-		debugLogger.Err(err).Msg("Failed to send Analytics")
-		return
-	}
-	defer func() { _ = res.Body.Close() }()
-
-	successfullySend := 200 <= res.StatusCode && res.StatusCode < 300
-	if successfullySend {
-		debugLogger.Print("Analytics successfully send")
-	} else {
-		var details string
-		if res != nil {
-			details = res.Status
-		}
-
-		debugLogger.Print("Failed to send Analytics:", details)
-	}
-}
-
-func sendInstrumentation(eng workflow.Engine, instrumentor analytics.InstrumentationCollector, logger *zerolog.Logger) {
-	// Avoid duplicate data to be sent for IDE integrations that use the CLI
-	if !shallSendInstrumentation(eng.GetConfiguration(), instrumentor) {
-		logger.Print("This CLI call is not instrumented!")
-		return
-	}
-
-	// add temporary static nodejs binary flag, remove once linuxstatic is official
-	staticNodeJsBinaryBool, parseErr := strconv.ParseBool(constants.StaticNodeJsBinary)
-	if parseErr != nil {
-		logger.Print("Failed to parse staticNodeJsBinary:", parseErr)
-	} else {
-		// the legacycli:: prefix is added to maintain compatibility with our monitoring dashboard
-		instrumentor.AddExtension("legacycli::static-nodejs-binary", staticNodeJsBinaryBool)
-	}
-
-	logger.Print("Sending Instrumentation")
-	data, err := analytics.GetV2InstrumentationObject(instrumentor, analytics.WithLogger(logger))
-	if err != nil {
-		logger.Err(err).Msg("Failed to derive data object")
-	}
-
-	v2InstrumentationData := utils.ValueOf(json.Marshal(data))
-	localConfiguration := globalConfiguration.Clone()
-	// the report analytics workflow needs --experimental to run
-	// we pass the flag here so that we report at every interaction
-	localConfiguration.Set(configuration.FLAG_EXPERIMENTAL, true)
-	localConfiguration.Set("inputData", string(v2InstrumentationData))
-	_, err = eng.InvokeWithConfig(
-		localworkflows.WORKFLOWID_REPORT_ANALYTICS,
-		localConfiguration,
-	)
-
-	if err != nil {
-		logger.Err(err).Msg("Failed to send Instrumentation")
-	} else {
-		logger.Print("Instrumentation successfully sent")
-	}
 }
 
 func help(_ *cobra.Command, _ []string) error {
@@ -541,11 +477,56 @@ func initExtensions(engine workflow.Engine, config configuration.Configuration) 
 	engine.AddExtensionInitializer(workflows.InitConnectivityCheckWorkflow)
 	engine.AddExtensionInitializer(ignoreworkflow.InitIgnoreWorkflows)
 	engine.AddExtensionInitializer(agentscan.Init)
+	engine.AddExtensionInitializer(secrets.Init)
 
 	if config.GetBool(configuration.PREVIEW_FEATURES_ENABLED) {
-		engine.AddExtensionInitializer(secrets.Init)
 		config.Set("INTERNAL_USE_UFM_PRESENTER", true)
 	}
+}
+
+// tearDown handles sending analytics and instrumentation
+// It is used both for normal exit and signal-triggered exit
+func tearDown(err error, errorList []error, startTime time.Time, ua networking.UserAgentInfo, cliAnalytics analytics.Analytics, networkAccess networking.NetworkAccess) int {
+	// Create a context with timeout for teardown operations to ensure we don't hang indefinitely
+	teardownCtx, cancel := context.WithTimeout(context.Background(), teardownTimeout)
+	defer cancel()
+
+	outputError := err
+	allErrors := errorList
+
+	if err != nil {
+		allErrors, outputError = processError(err, errorList)
+
+		for _, tempError := range allErrors {
+			if tempError != nil {
+				cliAnalytics.AddError(tempError)
+			}
+		}
+	}
+
+	exitCode := cliv2.DeriveExitCode(outputError)
+	globalLogger.Printf("Deriving Exit Code %d (cause: %v)", exitCode, outputError)
+
+	displayError(outputError, globalEngine.GetUserInterface(), globalConfiguration, globalContext)
+
+	updateInstrumentationDataBeforeSending(cliAnalytics, startTime, ua, exitCode)
+
+	if !globalConfiguration.GetBool(configuration.ANALYTICS_DISABLED) {
+		sendAnalytics(teardownCtx, cliAnalytics, globalLogger)
+	}
+	sendInstrumentation(teardownCtx, globalEngine, cliAnalytics.GetInstrumentation(), globalLogger)
+
+	// cleanup resources in use
+	// WARNING: deferred actions will execute AFTER cleanup; only defer if not impacted by this
+	if _, cleanupErr := globalEngine.Invoke(basic_workflows.WORKFLOWID_GLOBAL_CLEANUP, workflow.WithContext(teardownCtx)); cleanupErr != nil {
+		globalLogger.Printf("Failed to cleanup %v", cleanupErr)
+	}
+
+	if globalConfiguration.GetBool(configuration.DEBUG) {
+		writeLogFooter(exitCode, allErrors, globalConfiguration, networkAccess)
+	}
+
+	return exitCode
 }
 
 func MainWithErrorCode() int {
@@ -553,6 +534,15 @@ func MainWithErrorCode() int {
 
 	errorList := []error{}
 	errorListMutex := sync.Mutex{}
+	var finalExitCode int
+
+	// preparing the possibility to tearDown from different threads while ensure it is only called once
+	var tearDownOnce sync.Once
+
+	// init context
+	ctx := context.Background()
+	ctx = context.WithValue(ctx, networking.InteractionIdKey, instrumentation.AssembleUrnFromUUID(interactionId))
+	globalContext = ctx
 
 	startTime := time.Now()
 	var err error
@@ -633,10 +623,6 @@ func MainWithErrorCode() int {
 		return constants.SNYK_EXIT_CODE_ERROR
 	}
 
-	// init context
-	ctx := context.Background()
-	ctx = context.WithValue(ctx, networking.InteractionIdKey, instrumentation.AssembleUrnFromUUID(interactionId))
-
 	// add output flags as persistent flags
 	outputWorkflow, _ := globalEngine.GetWorkflow(localworkflows.WORKFLOWID_OUTPUT_WORKFLOW)
 	outputFlags := workflow.FlagsetFromConfigurationOptions(outputWorkflow.GetConfigurationOptions())
@@ -681,68 +667,40 @@ func MainWithErrorCode() int {
 		// ignore
 	}
 
-	if err != nil {
-		errorList, err = processError(err, errorList)
+	tearDownOnce.Do(func() {
+		errorListMutex.Lock()
+		errorListCopy := append([]error{}, errorList...)
+		errorListMutex.Unlock()
 
-		for _, tempError := range errorList {
-			if tempError != nil {
-				cliAnalytics.AddError(tempError)
-			}
-		}
-	}
+		finalExitCode = tearDown(err, errorListCopy, startTime, ua, cliAnalytics, networkAccess)
+	})
 
-	displayError(err, globalEngine.GetUserInterface(), globalConfiguration, ctx)
-
-	exitCode := cliv2.DeriveExitCode(err)
-	globalLogger.Printf("Deriving Exit Code %d (cause: %v)", exitCode, err)
-
-	updateInstrumentationDataBeforeSending(cliAnalytics, startTime, ua, exitCode)
-
-	if !globalConfiguration.GetBool(configuration.ANALYTICS_DISABLED) {
-		sendAnalytics(cliAnalytics, globalLogger)
-	}
-	sendInstrumentation(globalEngine, cliAnalytics.GetInstrumentation(), globalLogger)
-
-	// cleanup resources in use
-	// WARNING: deferred actions will execute AFTER cleanup; only defer if not impacted by this
-	_, err = globalEngine.Invoke(basic_workflows.WORKFLOWID_GLOBAL_CLEANUP)
-	if err != nil {
-		globalLogger.Printf("Failed to cleanup %v", err)
-	}
-
-	if debugEnabled {
-		writeLogFooter(exitCode, errorList, globalConfiguration, networkAccess)
-	}
-
-	return exitCode
+	return finalExitCode
 }
 
 func processError(err error, errorList []error) ([]error, error) {
 	// ensure to use generic fallback error catalog error if no other is available
-	err = decorateError(err)
+	resultError := decorateError(err)
+	resultErrorList := errorList
 
 	// filter legacycli terminate errors since it is only used for internal purposes
-	if exitErr, isExitError := err.(*exec.ExitError); isExitError && exitErr.ExitCode() == constants.SNYK_EXIT_CODE_TS_CLI_TERMINATED {
-		err = nil
+	if exitErr, isExitError := resultError.(*exec.ExitError); isExitError && exitErr.ExitCode() == constants.SNYK_EXIT_CODE_TS_CLI_TERMINATED {
+		resultError = nil
 	}
 
-	// add all errors to analytics
-	if err != nil {
-		errorList = append([]error{err}, errorList...)
+	// ensure to have all errors in the list for analytics, determining the most relevant error to surface to the user ...
+	if resultError != nil {
+		resultErrorList = append([]error{resultError}, resultErrorList...)
 	}
 
-	// create a single error from all errors
-	if len(errorList) == 1 {
-		err = errorList[0]
-	} else if len(errorList) > 1 {
-		err = errors.Join(errorList...)
-	}
+	// determine the most relevant error to surface to the user and derive the exit code from
+	resultError = cli_errors.FindMostRelevantError(resultErrorList)
 
 	// ensure to apply exit code mapping based on errors
-	if exitCode := mapErrorToExitCode(err); exitCode != unsetExitCode {
-		err = createErrorWithExitCode(exitCode, err)
+	if exitCode := mapErrorToExitCode(resultError); exitCode != unsetExitCode {
+		resultError = createErrorWithExitCode(exitCode, resultError)
 	}
-	return errorList, err
+	return resultErrorList, resultError
 }
 
 func setTimeout(config configuration.Configuration, onTimeout func()) {
