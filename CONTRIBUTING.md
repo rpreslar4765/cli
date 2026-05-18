@@ -50,6 +50,9 @@ pass any command to run it with the repaired Node.js runtime, for example:
 ./scripts/repair-local-dev-environment.sh npm run lint
 ```
 
+If `npm ci` needs access to private `@snyk` packages, export `NODE_AUTH_TOKEN` (or `NPM_TOKEN`) before running the
+script.
+
 ## Building
 
 To build the project, run the following command in the root of the repository.

@@ -43,6 +43,7 @@ node_bin_dir="${node_dir}/bin"
 node_archive_name="node-v${node_version}-${platform}-${architecture}.${archive_extension}"
 node_archive_path="${tools_dir}/${node_archive_name}"
 node_download_url="https://nodejs.org/dist/v${node_version}/${node_archive_name}"
+npm_auth_token="${NODE_AUTH_TOKEN:-${NPM_TOKEN:-}}"
 
 mkdir -p "${tools_dir}"
 
@@ -96,6 +97,18 @@ cd "${repo_root}"
 
 if [[ $# -eq 0 ]]; then
   set -- npm ci --no-audit --no-progress --prefer-offline
+fi
+
+if [[ "$1" == "npm" ]] && [[ $# -ge 2 ]] && [[ "$2" =~ ^(ci|install)$ ]]; then
+  if [[ -z "${npm_auth_token}" ]]; then
+    echo "This repository installs private npm packages. Export NODE_AUTH_TOKEN (or NPM_TOKEN) and rerun the repair script." >&2
+    exit 1
+  fi
+
+  npm_userconfig="$(mktemp "${tools_dir}/npmrc.XXXXXX")"
+  trap 'rm -f "${npm_userconfig}"' EXIT
+  printf '//registry.npmjs.org/:_authToken=%s\n' "${npm_auth_token}" > "${npm_userconfig}"
+  export NPM_CONFIG_USERCONFIG="${npm_userconfig}"
 fi
 
 echo "Running: $*"
