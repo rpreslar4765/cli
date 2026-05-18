@@ -99,9 +99,9 @@ if [[ $# -eq 0 ]]; then
   set -- npm ci --no-audit --no-progress --prefer-offline
 fi
 
-if [[ "$1" == "npm" ]] && [[ $# -ge 2 ]] && [[ "$2" =~ ^(ci|install)$ ]]; then
+if [[ "$1" == "npm" ]] && [[ "${2:-}" =~ ^(ci|install)$ ]]; then
   if [[ -z "${npm_auth_token}" ]]; then
-    echo "This repository installs private npm packages. Export NODE_AUTH_TOKEN (or NPM_TOKEN) and rerun the repair script." >&2
+    echo "This repository installs private npm packages. Export NODE_AUTH_TOKEN (or NPM_TOKEN) and re-run the repair script." >&2
     exit 1
   fi
 
