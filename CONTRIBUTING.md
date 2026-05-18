@@ -36,6 +36,20 @@ the project.
 make clean
 ```
 
+If your local shell is using the wrong Node.js version or you do not have dependencies installed yet, repair the local
+toolchain with:
+
+```sh
+./scripts/repair-local-dev-environment.sh
+```
+
+The script reads `.nvmrc`, downloads the matching Node.js release into a local cache, and runs `npm ci`. You can also
+pass any command to run it with the repaired Node.js runtime, for example:
+
+```sh
+./scripts/repair-local-dev-environment.sh npm run lint
+```
+
 ## Building
 
 To build the project, run the following command in the root of the repository.
