@@ -6,7 +6,6 @@ import _ "github.com/snyk/go-application-framework/pkg/networking/fips_enable"
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -122,6 +121,7 @@ func initApplicationConfiguration(config configuration.Configuration) {
 	config.AddAlternativeKeys(configuration.LOG_LEVEL, []string{debug_level_flag})
 	config.AddAlternativeKeys(configuration.INTEGRATION_NAME, []string{integrationNameFlag})
 	config.AddAlternativeKeys(middleware.ConfigurationKeyRequestAttempts, []string{"snyk_max_attempts", maxNetworkRequestAttempts})
+	config.AddAlternativeKeys(cliv2.ConfigKeyRequestConcurrency, []string{"snyk_request_concurrency"})
 }
 
 func getFullCommandString(cmd *cobra.Command) string {
@@ -449,9 +449,6 @@ func displayError(err error, userInterface ui.UserInterface, config configuratio
 			jsonErrorBuffer, _ := json.MarshalIndent(jsonError, "", "  ")
 			_ = userInterface.OutputError(fmt.Errorf("%s", jsonErrorBuffer))
 		} else {
-			if errors.Is(err, context.DeadlineExceeded) {
-				err = fmt.Errorf("command timed out")
-			}
 			uiError := userInterface.OutputError(err, ui.WithContext(ctx))
 			if uiError != nil {
 				globalLogger.Err(uiError).Msg("ui failed to show error")
@@ -643,7 +640,14 @@ func MainWithErrorCode() int {
 	cliAnalytics.GetInstrumentation().SetStatus(analytics.Success)
 
 	setTimeout(globalConfiguration, func() {
-		os.Exit(constants.SNYK_EXIT_CODE_EX_UNAVAILABLE)
+		tearDownOnce.Do(func() {
+			errorListMutex.Lock()
+			errorListCopy := append([]error{}, errorList...)
+			errorListMutex.Unlock()
+
+			exitCode := tearDown(context.DeadlineExceeded, errorListCopy, startTime, ua, cliAnalytics, networkAccess)
+			os.Exit(exitCode)
+		})
 	})
 
 	// run the extensible cli
@@ -712,7 +716,6 @@ func setTimeout(config configuration.Configuration, onTimeout func()) {
 	go func() {
 		const gracePeriodForSubProcesses = 3
 		<-time.After(time.Duration(timeout+gracePeriodForSubProcesses) * time.Second)
-		_, _ = fmt.Fprintf(os.Stdout, "command timed out")
 		onTimeout()
 	}()
 }
